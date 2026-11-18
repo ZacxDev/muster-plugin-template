@@ -106,7 +106,7 @@ func CheckBaseURL(raw string) (string, error) {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("MUSTER_URL must carry no user, query or fragment")
 	}
-	if (u.Path != "" && u.Path != "/") || (u.RawPath != "" && u.RawPath != "/") {
+	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("MUSTER_URL must be muster's address alone, with no path (e.g. https://muster.example.com)")
 	}
 	return u.Scheme + "://" + u.Host, nil

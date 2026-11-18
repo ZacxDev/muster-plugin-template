@@ -64,15 +64,22 @@ reply, so you also need what the quickstart's
   2. Restart it: `systemctl --user restart muster-mirror` on Linux. On macOS
      run the installer again instead, as
      `curl -fsSL https://github.com/ZacxDev/muster/releases/latest/download/install.sh | MUSTER_MIRROR_INTERACTIVE=1 sh`
-     (its service keeps a copy of the settings from the last install). The
-     log says `INTERACTIVE (-interactive)` and
-     `MCP endpoint for this host's Claude Code sessions at http://127.0.0.1:47823/mcp`.
+     (its service keeps a copy of the settings from the last install). If
+     this machine joined a hub, add `MUSTER_JOIN_URL=<hub>` before `sh`, as
+     when you installed it: without it the installer would set up a muster
+     server here instead. On Linux without a systemd user session (WSL, a
+     container), stop the `muster-mirror` you started by hand and start it
+     again the same way. The log says `INTERACTIVE (-interactive)` and
+     `MCP endpoint for this host's Claude Code sessions at http://127.0.0.1:47823/mcp (secret in <path>)`.
+     Copy that `<path>`: it differs by OS, and `muster doctor` prints it too
+     ([where the secret is](https://github.com/ZacxDev/muster/blob/main/docs/features.md#where-the-mcp-secret-is)).
   3. Register the endpoint with Claude Code by running the first line, and
-     add the second to the shell tmux starts (`~/.zshrc` or `~/.bashrc`):
+     add the second, with `<path>` the secret's path from step 2, to the
+     shell tmux starts (`~/.zshrc` or `~/.bashrc`):
 
      ```sh
      claude mcp add-json --scope user muster '{"type":"http","url":"http://127.0.0.1:47823/mcp","headers":{"Authorization":"Bearer ${MUSTER_MIRROR_MCP_SECRET:-}","X-Muster-Pane":"${TMUX_PANE:-}","X-Muster-Tmux":"${TMUX:-}"}}'
-     export MUSTER_MIRROR_MCP_SECRET="$(cat ~/.config/muster-mirror/mcp-secret 2>/dev/null)"
+     export MUSTER_MIRROR_MCP_SECRET="$(cat '<path>')"
      ```
 
   4. Start Claude Code in a new tmux window. Its `/mcp` lists `muster`, with
@@ -240,8 +247,10 @@ None. The plugin talks only to the muster at `MUSTER_URL`.
    commit) you ran your plugin against, and update it each time you test
    again: the listing asks for it.
 7. Keep the secret scan. CI runs gitleaks over the whole history with
-   `.gitleaks.toml`, which allows one exact test fixture (`mpl_s3cretT0ken`)
-   and nothing else; remove that entry if you remove the fixture.
+   `.gitleaks.toml`, which adds a rule for a muster plugin token (`mpl_`
+   and 43 base64url characters, which gitleaks' own rules do not know) and
+   allows one exact test fixture (`mpl_s3cretT0ken`) and nothing else;
+   remove that entry if you remove the fixture.
 
 ## Layout
 

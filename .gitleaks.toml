@@ -1,8 +1,18 @@
-# gitleaks' default rules, plus one exception: the test fixture that stands in
-# for a plugin token pasted into the wrong place. It is not a credential, and
-# it is matched exactly, so a real mpl_ token is still caught.
+# gitleaks' default rules, plus a rule of our own for a muster plugin token
+# (gitleaks' defaults have none), plus one exception: the test fixture that
+# stands in for a plugin token pasted into the wrong place. It is not a
+# credential, and it is matched exactly, so a real mpl_ token is still caught.
 [extend]
 useDefault = true
+
+# muster mints a plugin token as "mpl_" + 43 base64url characters (32 random
+# bytes, unpadded). The 43rd character only ever carries 4 data bits, so it is
+# never "-" or "_" and the closing \b always holds.
+[[rules]]
+id = "muster-plugin-token"
+description = "muster plugin token (mpl_)"
+regex = '''\bmpl_[A-Za-z0-9_-]{43}\b'''
+keywords = ["mpl_"]
 
 [[allowlists]]
 description = "test fixture, not a credential"
