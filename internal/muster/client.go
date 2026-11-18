@@ -89,12 +89,14 @@ func AsError(err error) *Error {
 }
 
 // CheckBaseURL validates muster's address: https, except plain http to a
-// loopback host; no user, query or fragment. A plugin token acts as its owner,
-// so it never crosses a network in clear text.
+// loopback host; no user, path, query or fragment (a trailing "/" is fine). A
+// plugin token acts as its owner, so it never crosses a network in clear text,
+// and a token pasted into the URL is refused rather than sent on every call.
 func CheckBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("MUSTER_URL %q is not an absolute URL", raw)
+		// Never echo the value: a mistaken one may hold the token.
+		return "", errors.New("MUSTER_URL is not an absolute URL (its value is not shown, in case it holds a secret)")
 	}
 	h := u.Hostname()
 	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
@@ -104,7 +106,21 @@ func CheckBaseURL(raw string) (string, error) {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("MUSTER_URL must carry no user, query or fragment")
 	}
-	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/"), nil
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("MUSTER_URL must be muster's address alone, with no path (e.g. https://muster.example.com)")
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
+// Redact is a URL cut to its scheme and host, for a log line or an error: a
+// path, query or user part could hold the token. A value that does not parse
+// is not shown at all.
+func Redact(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(an address not shown)"
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // Client calls muster's /plugin/v1 routes with one plugin token.
@@ -239,6 +255,13 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, i
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		// net/http's error names the whole request URL; keep its scheme and
+		// host only, so a base that slipped past CheckBaseURL with a token in
+		// its path is never logged.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = Redact(ue.URL)
+		}
 		return 0, &Error{Kind: KindNetwork, Message: err.Error()}
 	}
 	defer resp.Body.Close()
