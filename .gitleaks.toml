@@ -1,0 +1,9 @@
+# gitleaks' default rules, plus one exception: the test fixture that stands in
+# for a plugin token pasted into the wrong place. It is not a credential, and
+# it is matched exactly, so a real mpl_ token is still caught.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "test fixture, not a credential"
+regexes = ['''^mpl_s3cretT0ken$''']

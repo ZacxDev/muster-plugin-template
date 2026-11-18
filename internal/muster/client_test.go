@@ -26,7 +26,6 @@ func TestCheckBaseURL(t *testing.T) {
 	ok := map[string]string{
 		"https://muster.example.com":     "https://muster.example.com",
 		"https://muster.example.com/":    "https://muster.example.com",
-		"https://example.com/muster/":    "https://example.com/muster",
 		"http://localhost:8105":          "http://localhost:8105",
 		"http://127.0.0.1:8105":          "http://127.0.0.1:8105",
 		"http://[::1]:8105":              "http://[::1]:8105",
@@ -55,6 +54,7 @@ func TestCheckBaseURLNeverEchoesTheValue(t *testing.T) {
 	const secret = "mpl_s3cretT0ken"
 	for _, bad := range []string{
 		secret, "muster.example.com/" + secret, "http://muster.example.com/" + secret,
+		"https://muster.example.com/" + secret, "http://localhost:8105/" + secret,
 		"https://muster.example.com/?token=" + secret, "https://" + secret + "@muster.example.com",
 		"https://muster.example.com/#" + secret, "%zz" + secret,
 	} {
@@ -65,6 +65,67 @@ func TestCheckBaseURLNeverEchoesTheValue(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "s3cretT0ken") {
 			t.Errorf("CheckBaseURL refusal echoes the value: %v", err)
+		}
+	}
+}
+
+// A token pasted into the URL's path would be sent, in the request line, on
+// every call, and named by every network error: a path is refused.
+func TestCheckBaseURLRefusesAPath(t *testing.T) {
+	const secret = "mpl_s3cretT0ken"
+	for _, bad := range []string{
+		"https://muster.example.com/" + secret, "http://localhost:8105/" + secret,
+		"https://example.com/muster", "https://example.com/muster/", "https://muster.example.com//",
+		"https://muster.example.com/%2F",
+	} {
+		got, err := muster.CheckBaseURL(bad)
+		if err == nil {
+			t.Errorf("CheckBaseURL(%q) = %q: a URL with a path was accepted", bad, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "no path") {
+			t.Errorf("CheckBaseURL(%q) refused it for another reason: %v", bad, err)
+		}
+		if strings.Contains(err.Error(), "s3cretT0ken") {
+			t.Errorf("CheckBaseURL refusal echoes the value: %v", err)
+		}
+	}
+}
+
+// Defence in depth: net/http's error names the whole request URL. A base
+// with a token in its path (one that skipped CheckBaseURL) must not reach the
+// error, and so the log, through it.
+func TestANetworkErrorNamesTheSchemeAndHostOnly(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	base := closed.URL
+	closed.Close()
+	c, err := muster.New(base+"/mpl_s3cretT0ken", mustertest.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Self(context.Background())
+	e := muster.AsError(err)
+	if e == nil || e.Kind != muster.KindNetwork {
+		t.Fatalf("Self on a closed port = %v, want a network error", err)
+	}
+	if strings.Contains(err.Error(), "s3cretT0ken") || strings.Contains(err.Error(), "/plugin/v1") {
+		t.Errorf("the network error names the request path: %v", err)
+	}
+	if !strings.Contains(err.Error(), base) {
+		t.Errorf("the network error lost the scheme and host %s: %v", base, err)
+	}
+}
+
+func TestRedact(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://muster.example.com/mpl_s3cretT0ken?x=1#f": "https://muster.example.com",
+		"https://u:p@muster.example.com:8443/a":            "https://muster.example.com:8443",
+		"http://127.0.0.1:8105":                            "http://127.0.0.1:8105",
+		"%zzmpl_s3cretT0ken":                               "(an address not shown)",
+		"mpl_s3cretT0ken":                                  "(an address not shown)",
+	} {
+		if got := muster.Redact(in); got != want {
+			t.Errorf("Redact(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

@@ -27,6 +27,12 @@ first; the full API is [docs/plugins.md](https://github.com/ZacxDev/muster/blob/
 
 ## Run it against a local muster
 
+**Tested against** muster commit `be827a860` (after release `v0.246.0`): the
+whole run below, from the plugin's first message to its `SEND` and
+`muster recorded sent`, with the settings this section names and a
+`muster-mirror` set up as below. The chief's choice to route, and the Claude
+Code session's answer, were played by test stand-ins calling the same tools.
+
 You need Go (the version in `go.mod`) and a muster you can sign in to. A
 local install answers at `http://localhost:8105`. Something has to write the
 reply, so you also need what the quickstart's
@@ -39,6 +45,38 @@ reply, so you also need what the quickstart's
   muster's tools. The Compose chief cannot draft a reply itself: it routes
   the message to that session, and the session writes the reply. On
   Kubernetes the chief drafts it, and you can skip this.
+
+  **The one-line install does not set this session up.** Its `muster-mirror`
+  is read-only, and a read-only host refuses the route: the chief's
+  `route_to_session` answers `host_not_interactive` ("This host is read-only
+  — its muster-mirror was not started with -interactive."). Do this once, on
+  the machine where the session runs (the quickstart's
+  [The session that writes the reply](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#the-session-that-writes-the-reply)
+  explains each step):
+
+  1. Add two lines to `~/.config/muster-mirror/env`:
+
+     ```sh
+     MUSTER_MIRROR_INTERACTIVE=1                # muster may type into this host's windows: effectively a shell here
+     MUSTER_MIRROR_MCP_LISTEN=127.0.0.1:47823   # muster's tools for this host's Claude Code sessions
+     ```
+
+  2. Restart it: `systemctl --user restart muster-mirror` on Linux. On macOS
+     run the installer again instead, as
+     `curl -fsSL https://github.com/ZacxDev/muster/releases/latest/download/install.sh | MUSTER_MIRROR_INTERACTIVE=1 sh`
+     (its service keeps a copy of the settings from the last install). The
+     log says `INTERACTIVE (-interactive)` and
+     `MCP endpoint for this host's Claude Code sessions at http://127.0.0.1:47823/mcp`.
+  3. Register the endpoint with Claude Code by running the first line, and
+     add the second to the shell tmux starts (`~/.zshrc` or `~/.bashrc`):
+
+     ```sh
+     claude mcp add-json --scope user muster '{"type":"http","url":"http://127.0.0.1:47823/mcp","headers":{"Authorization":"Bearer ${MUSTER_MIRROR_MCP_SECRET:-}","X-Muster-Pane":"${TMUX_PANE:-}","X-Muster-Tmux":"${TMUX:-}"}}'
+     export MUSTER_MIRROR_MCP_SECRET="$(cat ~/.config/muster-mirror/mcp-secret 2>/dev/null)"
+     ```
+
+  4. Start Claude Code in a new tmux window. Its `/mcp` lists `muster`, with
+     `route_reply` among its tools.
 
 1. **Turn plugins on**, as in the quickstart's
    [step 1](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#1-turn-plugins-on). In the `.env` beside muster's
@@ -72,7 +110,9 @@ reply, so you also need what the quickstart's
      (`route_to_session`). It is queued in that session's window and pasted
      once Claude Code is idle; the session answers with its `route_reply`
      tool, and the answer becomes the reply draft. If the chief leaves it, ask
-     it in its chat to route the echo message to your session.
+     it in its chat to route the echo message to your session. If it reports
+     the route refused with `host_not_interactive`, that host's
+     `muster-mirror` is still read-only: do the setup above.
    - **On Kubernetes** the chief can draft the reply itself (`reply_draft`).
 
    Without a chief the messages wait, queued, on `/plugins`.
@@ -96,7 +136,7 @@ Read from the environment only; `.env.example` lists them.
 
 | variable | required | meaning |
 |---|---|---|
-| `MUSTER_URL` | yes | muster's address. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; no user, query or fragment |
+| `MUSTER_URL` | yes | muster's address. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; the address alone: no user, path, query or fragment |
 | `MUSTER_PLUGIN_TOKEN` | yes | the `mpl_…` token from `/plugins`. Never logged |
 | `ECHO_INTERVAL` | no | how often the fake upstream produces a message; default `30s` |
 | `STATE_DIR` | no | where the sent-drafts journal and the upstream cursor live; default `./state` |
@@ -170,8 +210,12 @@ None. The plugin talks only to the muster at `MUSTER_URL`.
 1. **Use this template** on GitHub (or clone it) into a repository of your own.
 2. Change the module path in `go.mod` and every import
    (`github.com/ZacxDev/muster-plugin-template/…`) to yours, and rename the
-   binary (the repository directory, `.gitignore`'s `/muster-plugin-template`).
-3. Replace `internal/echo`:
+   binary (the repository directory, `.gitignore`'s `/muster-plugin-template`,
+   and the `muster-plugin-template:` prefix of `main.go`'s log lines).
+3. Replace `internal/echo`, and the two lines of `main.go`'s `run` that wire
+   it in: `echo.OpenUpstream(cfg.StateDir)` and
+   `&echo.Sender{Out: os.Stdout}`. Rename `ECHO_INTERVAL` too (in `main.go`
+   and `.env.example`) if your upstream is not polled on a timer.
    - `Upstream` becomes a reader of your system (`plugin.Upstream`): `Next`
      returns the next message, the same one until `Advance`, and `Advance`
      moves your cursor on durably. Give every message a stable `external_id`
@@ -192,6 +236,12 @@ None. The plugin talks only to the muster at `MUSTER_URL`.
 6. State your token scope and your telemetry in your README, as this one does,
    and add your plugin to muster's
    [ecosystem page](https://github.com/ZacxDev/muster/blob/main/docs/ecosystem.md).
+   Replace this README's **Tested against** line with the muster release (or
+   commit) you ran your plugin against, and update it each time you test
+   again: the listing asks for it.
+7. Keep the secret scan. CI runs gitleaks over the whole history with
+   `.gitleaks.toml`, which allows one exact test fixture (`mpl_s3cretT0ken`)
+   and nothing else; remove that entry if you remove the fixture.
 
 ## Layout
 
@@ -211,8 +261,8 @@ go test ./...
 ```
 
 The tests run against `internal/mustertest`, a fake muster that answers the
-four routes this plugin calls the way muster does. CI runs `gofmt`, `go vet`
-and `go test -race` on every push.
+four routes this plugin calls the way muster does. CI runs gitleaks, `gofmt`,
+`go vet` and `go test -race` on every push.
 
 ## Licence
 

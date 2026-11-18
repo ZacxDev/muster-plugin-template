@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -96,11 +95,12 @@ func run(logger *log.Logger) error {
 		Interval: cfg.Interval,
 		Log:      logger,
 	}
-	// Log the scheme and host only: a mistaken path could hold the token.
-	shown := cfg.URL
-	if u, err := url.Parse(cfg.URL); err == nil {
-		shown = u.Scheme + "://" + u.Host
-	}
-	logger.Printf("muster-plugin-template: talking to %s, a message every %s", shown, cfg.Interval)
+	logger.Print(startupLine(cfg))
 	return r.Run(ctx)
+}
+
+// startupLine is the first line the plugin logs. It names muster by scheme and
+// host only (muster.Redact): whatever else the address held could be the token.
+func startupLine(cfg Config) string {
+	return fmt.Sprintf("muster-plugin-template: talking to %s, a message every %s", muster.Redact(cfg.URL), cfg.Interval)
 }
