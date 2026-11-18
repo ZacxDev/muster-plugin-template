@@ -8,10 +8,17 @@ useDefault = true
 # muster mints a plugin token as "mpl_" + 43 base64url characters (32 random
 # bytes, unpadded). The 43rd character only ever carries 4 data bits, so it is
 # never "-" or "_" and the closing \b always holds.
+#
+# The lead is the start of a line or any character but a letter or a digit.
+# It is not \b: "_" is a word character, so \b misses a token glued to a name
+# (TOKEN_mpl_…), and so does [^A-Za-z0-9_]. A letter or digit before it still
+# does not count (xmpl_…: the tail of some longer string). secretGroup = 1
+# reports the token without the lead character.
 [[rules]]
 id = "muster-plugin-token"
 description = "muster plugin token (mpl_)"
-regex = '''\bmpl_[A-Za-z0-9_-]{43}\b'''
+regex = '''(?:^|[^A-Za-z0-9])(mpl_[A-Za-z0-9_-]{43})\b'''
+secretGroup = 1
 keywords = ["mpl_"]
 
 [[allowlists]]
