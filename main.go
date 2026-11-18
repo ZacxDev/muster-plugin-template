@@ -1,14 +1,15 @@
 // Command muster-plugin-template is a minimal muster plugin: an "echo"
 // round-trip. A fake upstream produces a message every ECHO_INTERVAL and posts
-// it to muster; the reply your chief drafts and you approve is claimed,
-// "sent" (written to stdout) and its result reported.
+// it to muster; the reply drafted for it (by your chief, or by a session the
+// chief routes it to) and approved by you is claimed, "sent" (written to
+// stdout) and its result reported.
 //
 // Configuration is read from the environment only (see .env.example):
 //
 //	MUSTER_URL           muster's address (https, or http to localhost)
 //	MUSTER_PLUGIN_TOKEN  the mpl_… token minted on muster's /plugins page
 //	ECHO_INTERVAL        how often the fake upstream produces a message (default 30s)
-//	STATE_DIR            where the sent-drafts journal lives (default ./state)
+//	STATE_DIR            where the sent-drafts journal and the upstream cursor live (default ./state)
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -80,16 +82,25 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	defer j.Close()
+	up, err := echo.OpenUpstream(cfg.StateDir)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	r := &plugin.Runner{
 		Client:   client,
-		Upstream: &echo.Upstream{},
+		Upstream: up,
 		Sender:   &echo.Sender{Out: os.Stdout},
 		Journal:  j,
 		Interval: cfg.Interval,
 		Log:      logger,
 	}
-	logger.Printf("muster-plugin-template: talking to %s, a message every %s", cfg.URL, cfg.Interval)
+	// Log the scheme and host only: a mistaken path could hold the token.
+	shown := cfg.URL
+	if u, err := url.Parse(cfg.URL); err == nil {
+		shown = u.Scheme + "://" + u.Host
+	}
+	logger.Printf("muster-plugin-template: talking to %s, a message every %s", shown, cfg.Interval)
 	return r.Run(ctx)
 }

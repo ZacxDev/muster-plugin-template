@@ -2,7 +2,8 @@
 // and send the replies the owner approved out.
 //
 //	upstream ──POST /plugin/v1/messages──▶ muster ──▶ chief (or an officer)
-//	                                         │ drafts a reply; the owner approves it
+//	                                         │ a reply is drafted (by the chief, or a
+//	                                         │ session it routes to); the owner approves it
 //	sender ◀──POST /plugin/v1/drafts/claim── muster
 //	sender ──POST /plugin/v1/drafts/{id}/result──▶ muster
 //
@@ -17,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ZacxDev/muster-plugin-template/internal/echo"
 	"github.com/ZacxDev/muster-plugin-template/internal/journal"
 	"github.com/ZacxDev/muster-plugin-template/internal/muster"
 )
@@ -26,18 +26,49 @@ import (
 // lacks a capability (403), or the server has plugins off (404).
 var ErrStop = errors.New("stopping")
 
-// Runner holds the plugin's parts. Every field but Sleep is required.
+// ErrUnknown is what a Sender returns (wrapped) when it cannot tell whether
+// the reply went: a timeout after the request left, a dropped connection
+// mid-send. The plugin then reports nothing, and muster marks the draft
+// unconfirmed when its lease lapses; it never offers it again, and the owner
+// decides. Return a plain error only when the reply is known NOT to have been
+// sent: that is reported "ok": false, and the reply goes back to whoever
+// wrote it to try again (so a reply that did go may be sent twice).
+var ErrUnknown = errors.New("not known whether the reply was sent")
+
+// Upstream is the system the messages come from (internal/echo's fake inbox
+// in this template).
+type Upstream interface {
+	// Next returns the next message, the same one until Advance.
+	Next() muster.Message
+	// Advance moves the cursor past it, durably. The runner calls it only
+	// after muster answered 2xx (or refused the message for good with 400).
+	Advance() error
+}
+
+// Sender delivers an approved reply upstream and returns the upstream's id
+// for it. It returns an error wrapping ErrUnknown when the reply may or may
+// not have gone, and any other error only when it certainly did not.
+type Sender interface {
+	Send(muster.Claim) (externalRef string, err error)
+}
+
+// Runner holds the plugin's parts. Every field but Sleep, Backoff,
+// MaxBackoff and ResultAttempts is required.
 type Runner struct {
 	Client   *muster.Client
-	Upstream *echo.Upstream
-	Sender   *echo.Sender
+	Upstream Upstream
+	Sender   Sender
 	Journal  *journal.Journal
 	Interval time.Duration // how often the fake upstream produces a message
 	Log      *log.Logger
 	// Sleep waits d or until ctx ends; tests replace it.
 	Sleep func(ctx context.Context, d time.Duration) error
-	// Backoff after a network or server error (default 5 s).
+	// Backoff after a network or server error (default 5 s), and the first
+	// wait after a 409 on a message.
 	Backoff time.Duration
+	// MaxBackoff caps the doubling wait after repeated 409s on a message
+	// (default 5 min).
+	MaxBackoff time.Duration
 	// ResultAttempts bounds re-posting one result (default 5).
 	ResultAttempts int
 }
@@ -61,6 +92,13 @@ func (r *Runner) backoff() time.Duration {
 		return r.Backoff
 	}
 	return 5 * time.Second
+}
+
+func (r *Runner) maxBackoff() time.Duration {
+	if r.MaxBackoff > 0 {
+		return r.MaxBackoff
+	}
+	return 5 * time.Minute
 }
 
 // fatal turns a refusal no retry fixes into ErrStop.
@@ -93,10 +131,14 @@ func (r *Runner) Hello(ctx context.Context) error {
 	return nil
 }
 
-// Deliver posts one upstream message, retrying it until muster answers 2xx:
-// the upstream cursor (Upstream's counter) only moves on after that. A 400 is
-// logged and the message dropped (sending it again cannot help).
+// Deliver posts one upstream message, retrying it until muster answers 2xx,
+// and returns nil only then, or on a 400 (logged and dropped: sending it
+// again cannot help). A 409 means muster stored nothing (the officer this
+// plugin delivers to is not defined): the same message is sent again, waiting
+// longer each time up to MaxBackoff. On any non-nil return the caller must
+// not advance the upstream cursor.
 func (r *Runner) Deliver(ctx context.Context, m muster.Message) error {
+	conflictWait := r.backoff()
 	for {
 		ack, err := r.Client.PostMessage(ctx, m)
 		if err == nil {
@@ -122,11 +164,27 @@ func (r *Runner) Deliver(ctx context.Context, m muster.Message) error {
 			if err := r.sleep(ctx, r.backoff()); err != nil {
 				return err
 			}
+		case e != nil && e.Kind == muster.KindConflict:
+			r.Log.Printf("message %s: muster stored nothing (%v); sending it again in %s", m.ExternalID, e, conflictWait)
+			if err := r.sleep(ctx, conflictWait); err != nil {
+				return err
+			}
+			conflictWait = min(2*conflictWait, r.maxBackoff())
 		default:
 			r.Log.Printf("message %s refused, dropped: %v", m.ExternalID, err)
 			return nil
 		}
 	}
+}
+
+// DeliverNext posts the upstream's next message and, once muster has it,
+// advances the upstream cursor. A message muster did not store leaves the
+// cursor where it was, so it is the next one sent again.
+func (r *Runner) DeliverNext(ctx context.Context) error {
+	if err := r.Deliver(ctx, r.Upstream.Next()); err != nil {
+		return err
+	}
+	return r.Upstream.Advance()
 }
 
 // ClaimOnce long-polls for one approved draft and settles it.
@@ -167,6 +225,12 @@ func (r *Runner) Settle(ctx context.Context, c muster.Claim) error {
 		return fmt.Errorf("journal: %w (draft %d not sent)", err, c.DraftID)
 	}
 	ref, err := r.Sender.Send(c)
+	if errors.Is(err, ErrUnknown) {
+		// It may have gone. Report nothing: "ok": false would offer it to be
+		// written and sent again. muster marks it unconfirmed after the lease.
+		r.Log.Printf("draft %d: not known whether it was sent (%v); reporting nothing, muster will mark it unconfirmed", c.DraftID, err)
+		return nil
+	}
 	if err != nil {
 		return r.report(ctx, c.DraftID, muster.Result{OK: false, Detail: "send failed: " + err.Error()})
 	}
@@ -230,7 +294,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		for ctx.Err() == nil {
-			if err := r.Deliver(ctx, r.Upstream.Next()); err != nil {
+			if err := r.DeliverNext(ctx); err != nil {
 				cancel(err)
 				return
 			}

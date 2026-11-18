@@ -94,7 +94,8 @@ func AsError(err error) *Error {
 func CheckBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("MUSTER_URL %q is not an absolute URL", raw)
+		// Never echo the value: a mistaken one may hold the token.
+		return "", errors.New("MUSTER_URL is not an absolute URL (its value is not shown, in case it holds a secret)")
 	}
 	h := u.Hostname()
 	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"

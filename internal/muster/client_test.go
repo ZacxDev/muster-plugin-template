@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,26 @@ func TestCheckBaseURL(t *testing.T) {
 	} {
 		if got, err := muster.CheckBaseURL(bad); err == nil {
 			t.Errorf("CheckBaseURL(%q) = %q, want a refusal", bad, got)
+		}
+	}
+}
+
+// A mistaken MUSTER_URL may hold the token (pasted into the wrong variable,
+// or into the path): the refusal must not echo it to the log.
+func TestCheckBaseURLNeverEchoesTheValue(t *testing.T) {
+	const secret = "mpl_s3cretT0ken"
+	for _, bad := range []string{
+		secret, "muster.example.com/" + secret, "http://muster.example.com/" + secret,
+		"https://muster.example.com/?token=" + secret, "https://" + secret + "@muster.example.com",
+		"https://muster.example.com/#" + secret, "%zz" + secret,
+	} {
+		_, err := muster.CheckBaseURL(bad)
+		if err == nil {
+			t.Errorf("CheckBaseURL(%q) accepted it", bad)
+			continue
+		}
+		if strings.Contains(err.Error(), "s3cretT0ken") {
+			t.Errorf("CheckBaseURL refusal echoes the value: %v", err)
 		}
 	}
 }

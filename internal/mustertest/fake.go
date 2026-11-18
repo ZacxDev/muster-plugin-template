@@ -37,6 +37,9 @@ type Fake struct {
 	Claims int
 	// RateLimit answers the next n message posts 429 with Retry-After: 7.
 	RateLimit int
+	// Conflict answers the next n message posts 409 and stores nothing, as
+	// muster does when the officer a bound plugin delivers to is not defined.
+	Conflict int
 	// Revoked makes every route answer 401, as muster does for a revoked token.
 	Revoked bool
 	// Off makes every route answer 404, as muster does with plugins off.
@@ -71,6 +74,14 @@ func (f *Fake) Approve(claimJSON string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queue = append(f.queue, claimJSON)
+}
+
+// MarkClaimed records draft id as claimed by this plugin, as if an earlier
+// process had claimed it (its result is then answered 200, not 404).
+func (f *Fake) MarkClaimed(id int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimed[id] = true
 }
 
 // Snapshot returns copies of what the fake recorded.
@@ -113,6 +124,11 @@ func (f *Fake) message(w http.ResponseWriter, r *http.Request) {
 		f.RateLimit--
 		w.Header().Set("Retry-After", "7")
 		write(w, 429, `{"error":"rate limited: 60 new messages in the last hour"}`)
+		return
+	}
+	if f.Conflict > 0 {
+		f.Conflict--
+		write(w, 409, `{"error":"the officer this plugin delivers to is not defined for its owner (or the built-in officer store is off): nothing was stored; send it again once the officer is back"}`)
 		return
 	}
 	var in struct {

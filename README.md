@@ -13,7 +13,9 @@ see it work before you write any real integration:
 
 1. Every `ECHO_INTERVAL` a fake upstream produces a message (`echo-1`,
    `echo-2`, …) and the plugin posts it to muster (`POST /plugin/v1/messages`).
-2. muster hands it to your chief, which may draft a reply.
+2. muster hands it to your chief. On Kubernetes the chief can draft a reply
+   itself; on the Docker Compose install it hands the message to one of your
+   mirrored Claude Code sessions, and that session writes the reply.
 3. You approve the draft in muster (**Asks → Drafts**).
 4. The plugin claims the approved draft (`POST /plugin/v1/drafts/claim`),
    "sends" it by printing it to stdout, and reports the result
@@ -23,15 +25,32 @@ New to muster plugins? Read muster's
 [plugin quickstart](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md)
 first; the full API is [docs/plugins.md](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md).
 
-## Run it in five minutes against a local muster
+## Run it against a local muster
 
 You need Go (the version in `go.mod`) and a muster you can sign in to. A
-local install answers at `http://localhost:8105`.
+local install answers at `http://localhost:8105`. Something has to write the
+reply, so you also need what the quickstart's
+[Before you start](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#before-you-start) lists:
 
-1. **Turn plugins on.** In the `.env` beside muster's `docker-compose.yml`
-   (`~/muster` for the one-line install) add `MUSTER_PLUGINS=1`, then run
-   `docker compose up -d --wait` there. muster's log says
-   `plugins: ENABLED (MUSTER_PLUGINS=1)`.
+- **A chief with a credential**: the `chief` profile and a Claude
+  subscription token (`claude setup-token`) or an OpenRouter key
+  ([features page, Chief](https://github.com/ZacxDev/muster/blob/main/docs/features.md#chief)).
+- **On the Docker Compose install, one mirrored Claude Code session** with
+  muster's tools. The Compose chief cannot draft a reply itself: it routes
+  the message to that session, and the session writes the reply. On
+  Kubernetes the chief drafts it, and you can skip this.
+
+1. **Turn plugins on**, as in the quickstart's
+   [step 1](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#1-turn-plugins-on). In the `.env` beside muster's
+   `docker-compose.yml` (`~/muster` for the one-line install) add
+
+   ```sh
+   MUSTER_PLUGINS=1
+   MUSTER_SESSION_ROUTING=1   # Compose: lets the chief hand the message to your session
+   ```
+
+   then run `docker compose up -d --wait` there. muster's log says
+   `plugins: ENABLED (MUSTER_PLUGINS=1)` and `session routing: ON`.
 2. **Create the plugin.** Open `http://localhost:8105/plugins` (it has no menu
    link), give it a name such as `example-echo` and a label such as `Echo`,
    and press **Create plugin token**. Copy the `mpl_…` token: it is shown once.
@@ -46,11 +65,17 @@ local install answers at `http://localhost:8105`.
 
    It logs the plugin's name and capabilities, then
    `message echo-1 stored as <id> (queued)`.
-4. **Watch the chief.** Each message reaches your chief in a conversation named
-   after the plugin's label, marked as untrusted data. The chief can draft a
-   reply. (Without a chief the messages wait, queued, on `/plugins`; turning
-   the chief on is in muster's
-   [features page](https://github.com/ZacxDev/muster/blob/main/docs/features.md#chief).)
+4. **Watch the message reach a writer**, as in the quickstart's
+   [step 4](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#4-watch-the-chief-handle-it). Each message reaches your chief
+   in a conversation named after the plugin's label, marked as untrusted data.
+   - **On Compose** the chief routes it to your mirrored session
+     (`route_to_session`). It is queued in that session's window and pasted
+     once Claude Code is idle; the session answers with its `route_reply`
+     tool, and the answer becomes the reply draft. If the chief leaves it, ask
+     it in its chat to route the echo message to your session.
+   - **On Kubernetes** the chief can draft the reply itself (`reply_draft`).
+
+   Without a chief the messages wait, queued, on `/plugins`.
 5. **Approve the reply** on the **Asks** page's **Drafts** tab
    (`/attention?tab=drafts`): **Approve and send**.
 6. Within a few seconds the plugin prints
@@ -74,7 +99,7 @@ Read from the environment only; `.env.example` lists them.
 | `MUSTER_URL` | yes | muster's address. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; no user, query or fragment |
 | `MUSTER_PLUGIN_TOKEN` | yes | the `mpl_…` token from `/plugins`. Never logged |
 | `ECHO_INTERVAL` | no | how often the fake upstream produces a message; default `30s` |
-| `STATE_DIR` | no | where the sent-drafts journal lives; default `./state` |
+| `STATE_DIR` | no | where the sent-drafts journal and the upstream cursor live; default `./state` |
 
 ## What it does on each answer
 
@@ -82,12 +107,13 @@ Read from the environment only; `.env.example` lists them.
 |---|---|---|
 | any | `401` | stops: the token was revoked, or its owner disabled |
 | any | `404` | stops: plugins are off on that server (or, on a result, logs: not a draft it claimed) |
-| message | `202` / `200` | moves to the next message (`200` is a repeat muster already stored) |
+| message | `202` / `200` | moves the cursor on and writes it to `STATE_DIR/echo-cursor` (`200` is a repeat muster already stored) |
 | message | `400` | logs and drops it: sending it again cannot help |
+| message | `409` | muster stored nothing (the officer the plugin delivers to is not defined): waits 5 s, doubling up to 5 min, and sends the **same** message again; the cursor does not move |
 | message | `429` | waits `Retry-After`, then sends the **same** message again |
 | message | network error, `5xx` | waits 5 s and sends the same message again |
 | claim | `204` | claims again (each claim waits up to 25 s) |
-| claim | `200` | journals the draft, sends it once, reports the result |
+| claim | `200` | journals the draft, sends it once, reports the result (none when the send's outcome is unknown: below) |
 | result | network error, `5xx` | posts the same result again (a repeat is safe) |
 | result | `409` | logs it: the draft already has the other result |
 
@@ -98,6 +124,33 @@ crash left it claimed but not known to be sent, nothing is sent or reported,
 and muster marks it unconfirmed after its 2-minute lease (it never offers it
 again). This is muster's rule in
 [plugins.md, "At most once"](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#at-most-once).
+
+**Sent, not sent, or not known.** A sender returns one of three outcomes, and
+each is reported differently:
+
+| `Sender.Send` returns | the plugin reports | muster then |
+|---|---|---|
+| the upstream's id, no error | `"ok": true` with it as `external_ref` | marks the draft sent |
+| an error wrapping `plugin.ErrUnknown` | **nothing** | marks it unconfirmed when its lease lapses; never offers it again, and you decide |
+| any other error | `"ok": false` with the error as `detail` | hands the reply back to whoever wrote it to try again |
+
+`"ok": false` means "known **not** sent". Return it only when the upstream
+said so (a refusal, an error before anything left). A timeout after the
+request went out, or a connection lost mid-send, is `ErrUnknown`: reporting
+`ok: false` then could get the same reply sent twice.
+
+**Long sends.** muster leases a claimed draft for 2 minutes. A sender that
+can take longer (a post made through a browser, say) should renew the lease
+about once a minute while it runs, with
+[`POST /plugin/v1/drafts/{id}/renew`](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#post-pluginv1draftsidrenew-keep-a-long-sends-claim),
+up to 10 minutes after the claim. This template does not renew: its "send" is
+a print. Without a renewal a slow success is marked unconfirmed under it.
+
+**The journal grows.** `journal.jsonl` gains up to three short lines per draft
+and is never compacted (a few megabytes after tens of thousands of drafts). Do
+not delete it: a draft id missing from it is one the plugin would send again.
+To shrink it, stop the plugin and keep only the last line for each
+`draft_id`.
 
 ## Token scope
 
@@ -119,11 +172,15 @@ None. The plugin talks only to the muster at `MUSTER_URL`.
    (`github.com/ZacxDev/muster-plugin-template/…`) to yours, and rename the
    binary (the repository directory, `.gitignore`'s `/muster-plugin-template`).
 3. Replace `internal/echo`:
-   - `Upstream.Next` becomes a reader of your system. Give every message a
-     stable `external_id` (muster's idempotency key), and advance your own
-     cursor only after muster answers `2xx`.
-   - `Sender.Send` becomes the call that delivers a reply there. Return the
-     upstream's id for what you sent; it is reported as `external_ref`.
+   - `Upstream` becomes a reader of your system (`plugin.Upstream`): `Next`
+     returns the next message, the same one until `Advance`, and `Advance`
+     moves your cursor on durably. Give every message a stable `external_id`
+     (muster's idempotency key). The runner calls `Advance` only after muster
+     answers `2xx` (or a `400`).
+   - `Sender` becomes the call that delivers a reply there (`plugin.Sender`).
+     Return the upstream's id for what you sent; it is reported as
+     `external_ref`. Wrap `plugin.ErrUnknown` when you cannot tell whether it
+     went (above).
 4. Set the message fields your system knows: `sender_verified` only if you
    authenticated the sender, `no_reply` for a message nobody can answer,
    `thread` for a thread id
@@ -143,7 +200,7 @@ None. The plugin talks only to the muster at `MUSTER_URL`.
 | `main.go` | reads the environment, starts the loops |
 | `internal/muster` | the client for muster's plugin routes |
 | `internal/plugin` | the two loops: messages in, approved drafts out |
-| `internal/echo` | the fake upstream and the stdout "sender": replace these |
+| `internal/echo` | the fake upstream (with its cursor) and the stdout "sender": replace these |
 | `internal/journal` | the sent-drafts journal |
 | `internal/mustertest` | a fake muster for tests (`httptest`) |
 

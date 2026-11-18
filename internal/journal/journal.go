@@ -4,7 +4,14 @@
 // send the same draft_id twice, post the result again if unsure).
 //
 // It is an append-only JSON-lines file; every record is fsynced before the
-// call returns.
+// call returns, and the directory is fsynced when the journal is opened.
+//
+// It grows without bound: up to three short lines (about 60 bytes each) per
+// draft, never compacted, and read whole at start. That is a few megabytes
+// after tens of thousands of drafts. Entries are never dropped on purpose: a
+// draft id missing from the journal is one this plugin would send again if it
+// were ever handed it. To shrink it, stop the plugin and keep only the last
+// line for each draft_id.
 package journal
 
 import (
@@ -56,6 +63,12 @@ func Open(dir string) (*Journal, error) {
 	if err != nil {
 		return nil, err
 	}
+	// fsync the directory too, so a journal file just created survives a
+	// crash (the per-record fsync covers its contents, not its name).
+	if err := syncDir(dir); err != nil {
+		f.Close()
+		return nil, err
+	}
 	j := &Journal{f: f, entries: map[int64]Entry{}}
 	sc := bufio.NewScanner(f)
 	for line := 1; sc.Scan(); line++ {
@@ -71,6 +84,15 @@ func Open(dir string) (*Journal, error) {
 		return nil, err
 	}
 	return j, nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func (j *Journal) apply(r record) {
